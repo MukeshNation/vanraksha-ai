@@ -1271,3 +1271,6 @@ svg defs { display: none; }
 .dispatch-form a { color: var(--green-700); }
 .dispatch-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
 @media (max-width: 600px) { .dispatch-grid { grid-template-columns: 1fr; } }
+
+.map-network-status { position:absolute; top:80px; left:20px; right:20px; z-index:5; padding:14px; border-radius:8px; background:#fff4dd; color:#765d32; font-size:13px; }
+#map-view .scan-cta { bottom:48px; }
