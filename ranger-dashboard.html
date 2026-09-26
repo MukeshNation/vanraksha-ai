@@ -7,9 +7,7 @@
     <!-- Use project's global stylesheet -->
     <link rel="stylesheet" href="/src/styles.css" />
     
-    <!-- MapLibre GL JS -->
-    <link href="https://unpkg.com/maplibre-gl@4.1.3/dist/maplibre-gl.css" rel="stylesheet" />
-    <script src="https://unpkg.com/maplibre-gl@4.1.3/dist/maplibre-gl.js"></script>
+
 
     <style>
         /* 
@@ -239,6 +237,39 @@
             color: var(--green-800);
             display: none;
         }
+        .map-status {
+            position: absolute; top: 20px; left: 20px; right: 20px;
+            background: var(--bg-card); padding: 16px; border-radius: 8px;
+            box-shadow: 0 4px 16px rgba(24, 61, 43, .1); z-index: 2;
+        }
+        .map-status[hidden] { display: none; }
+        .dashboard-container { grid-template-columns: 300px minmax(0, 1fr); }
+        .dashboard-container > .sidebar { min-height: 0; min-width: 0; display: flex; padding: 14px; overflow-x: hidden; gap: 14px; }
+        .ranger-navigation { display: grid; gap: 5px; flex-shrink: 0; }
+        .ranger-nav-label { font-size: 10px; letter-spacing: 1.3px; color: #849386; margin: 7px 12px 10px; }
+        .ranger-nav-item { display: flex; align-items: center; gap: 12px; width: 100%; padding: 12px 14px; border: 0; border-radius: 7px; color: #536a5b; background: transparent; text-decoration: none; font-family: var(--font-primary); font-size: 13px; text-align: left; cursor: pointer; }
+        .ranger-nav-item span { width: 19px; font-size: 19px; text-align: center; }
+        .ranger-nav-item:hover { background: #e0eadf; }
+        .ranger-nav-item.selected { color: white; background: #219b73; }
+        .ranger-nav-item:focus-visible { outline: 3px solid #74bda2; outline-offset: 2px; }
+        .sidebar-header { border-radius: 8px; flex-shrink: 0; }
+        .sidebar-header h2 { font-size: 17px; }
+        #refresh-alerts { margin: 10px 0; }
+        .alert-list { overflow: visible; flex: 1 0 auto; padding: 0; min-width: 0; }
+        .empty-state { padding: 24px 14px; background: var(--bg-card); border-radius: 8px; overflow-wrap: anywhere; }
+        .empty-state h3 { font-size: 18px; }
+        .empty-state p { font-size: 13px; font-weight: 400; }
+        #user-email-display { overflow-wrap: anywhere; }
+        .map-area { min-width: 0; }
+        .empty-state p { margin: 10px 0 16px; line-height: 1.5; }
+        @media (max-width: 700px) {
+            .dashboard-container { grid-template-columns: 1fr; height: auto; }
+            .dashboard-container > .sidebar { display: flex; max-height: 48vh; }
+            .map-area { height: 55vh; min-height: 320px; }
+            .action-panel { width: 90%; flex-wrap: wrap; bottom: 15px; }
+            .header-right { gap: 8px; }
+            #user-email-display { max-width: 150px; overflow-wrap: anywhere; }
+        }
     </style>
 </head>
 <body>
@@ -258,18 +289,28 @@
     </header>
 
     <div class="dashboard-container">
-        <div class="sidebar">
-            <div class="sidebar-header">
-                <h2>Pending Alerts</h2>
+        <aside class="sidebar" aria-label="Ranger workspace">
+            <nav class="ranger-navigation" aria-label="Ranger navigation">
+                <p class="ranger-nav-label">RANGER WORKSPACE</p>
+                <a class="ranger-nav-item selected" href="#pending-alerts" aria-current="page"><span aria-hidden="true">▤</span>Pending Alerts</a>
+                <a class="ranger-nav-item" href="/#geofences"><span aria-hidden="true">⬡</span>Forest Geofences</a>
+                <button class="ranger-nav-item" id="notifications-btn"><span aria-hidden="true">♧</span>Enable notifications</button>
+                <a class="ranger-nav-item" href="/"><span aria-hidden="true">▦</span>Main Dashboard</a>
+            </nav>
+            <div class="sidebar-header" id="pending-alerts" tabindex="-1">
+                <h2>Pending Alerts <span id="alert-count"></span></h2>
+                <p id="sync-status" role="status" style="font-size:12px">Waiting for your zone assignment</p>
+                <button id="refresh-alerts" class="btn-view-map" disabled>Refresh alerts</button>
                 <div id="zone-display" style="font-size: 11px; color: #7b6f60; text-transform: uppercase; letter-spacing: 0.5px; margin-top: 4px;"></div>
             </div>
             <div id="alert-list" class="alert-list">
-                <!-- Alerts will be injected here -->
+                <div class="empty-state" role="status">Loading your ranger profile…</div>
             </div>
-        </div>
+        </aside>
 
         <div class="map-area">
             <div id="map"></div>
+            <div id="map-status" class="map-status" role="status">Loading map…</div>
             
             <div id="action-panel" class="action-panel">
                 <button class="btn-action btn-confirm" id="btn-confirm-fire">Confirm Fire (GPS)</button>
@@ -285,7 +326,10 @@
     <div id="toast-container" class="toast-container"></div>
 
     <script type="module">
-        import { supabase } from './supabaseClient.js';
+        import { supabase } from '/src/services/supabaseClient.js';
+
+        import maplibregl from 'maplibre-gl';
+        import 'maplibre-gl/dist/maplibre-gl.css';
 
         // Zone Base Configuration
         const ZONE_BASES = {
@@ -299,6 +343,45 @@
         let selectedAlert = null;
         let mapMarkers = [];
         let routeSourceAdded = false;
+        let refreshTimer = null;
+        let loadingAlerts = false;
+        let knownAlertIds = new Set();
+        let initialAlertsLoaded = false;
+        const syncStatus = document.getElementById('sync-status');
+        const notificationButton = document.getElementById('notifications-btn');
+        const refreshButton = document.getElementById('refresh-alerts');
+        notificationButton.addEventListener('click', async () => {
+            if (!('Notification' in window)) {
+                showToast('Browser notifications are not supported here. New alerts still appear in your inbox.');
+                return;
+            }
+            try {
+                const permission = await Notification.requestPermission();
+                notificationButton.textContent = permission === 'granted' ? 'Notifications enabled' : 'Notifications blocked';
+                showToast(permission === 'granted' ? 'Notifications enabled while this dashboard is open.' : 'Allow notifications in browser settings. Inbox alerts remain available.');
+            } catch { showToast('Notifications unavailable. Inbox alerts remain available.'); }
+        });
+        refreshButton.addEventListener('click', () => loadAlerts(true));
+
+        function notifyNewAlerts(alerts) {
+            if (!alerts.length) return;
+            const message = `${alerts.length} new alert(s) in ${currentRanger.zone_id}.`;
+            showToast(message);
+            if ('Notification' in window && Notification.permission === 'granted') {
+                try { new Notification('VanaRaksha — Ranger Alert', { body: message, tag: 'ranger-alerts' }); }
+                catch { /* Inbox and toast remain available. */ }
+            }
+        }
+
+        function startAlertUpdates() {
+            if (refreshTimer) clearInterval(refreshTimer);
+            refreshButton.disabled = false;
+            refreshTimer = setInterval(() => loadAlerts(true), 15000);
+        }
+        window.addEventListener('pagehide', () => clearInterval(refreshTimer));
+        document.addEventListener('visibilitychange', () => {
+            if (!document.hidden && currentRanger) loadAlerts(true);
+        });
 
         const alertListEl = document.getElementById('alert-list');
         const userEmailDisplay = document.getElementById('user-email-display');
@@ -332,6 +415,28 @@
             return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) + ' ' + d.toLocaleDateString();
         }
 
+        const mapStatus = document.getElementById('map-status');
+
+        function showState(title, message, retry) {
+            alertListEl.replaceChildren();
+            const state = document.createElement('div');
+            state.className = 'empty-state';
+            state.setAttribute('role', 'status');
+            const heading = document.createElement('h3');
+            heading.textContent = title;
+            const detail = document.createElement('p');
+            detail.textContent = message;
+            state.append(heading, detail);
+            if (retry) {
+                const button = document.createElement('button');
+                button.className = 'btn-view-map';
+                button.textContent = 'Try again';
+                button.addEventListener('click', retry);
+                state.append(button);
+            }
+            alertListEl.append(state);
+        }
+
         function initMap() {
             map = new maplibregl.Map({
                 container: 'map',
@@ -341,7 +446,17 @@
                 zoom: 4
             });
 
+            const mapTimeout = setTimeout(() => {
+                mapStatus.hidden = false;
+                mapStatus.textContent = 'Map is taking longer than expected. Check your connection. Alert details remain available in the sidebar.';
+            }, 15000);
+            map.on('error', () => {
+                mapStatus.hidden = false;
+                mapStatus.textContent = 'Map could not load. Check your connection. Alert details remain available in the sidebar.';
+            });
             map.on('load', () => {
+                clearTimeout(mapTimeout);
+                mapStatus.hidden = true;
                 map.addSource('route', {
                     'type': 'geojson',
                     'data': {
@@ -372,7 +487,7 @@
         async function fetchRoute(startLng, startLat, endLng, endLat) {
             try {
                 const url = `https://router.project-osrm.org/route/v1/driving/${startLng},${startLat};${endLng},${endLat}?geometries=geojson`;
-                const response = await fetch(url);
+                const response = await fetch(url, { signal: AbortSignal.timeout(10000) });
                 const data = await response.json();
                 
                 if (data.code === 'Ok' && data.routes.length > 0) {
@@ -386,33 +501,50 @@
             }
         }
 
-        async function loadAlerts() {
+        async function loadAlerts(background = false) {
+            if (loadingAlerts || !currentRanger) return;
+            loadingAlerts = true;
+            refreshButton.disabled = true;
+            if (!background) showState('Loading alerts', 'Checking pending alerts in your zone…');
             try {
                 const { data, error } = await supabase
                     .from('alerts')
                     .select('*')
                     .eq('zone_id', currentRanger.zone_id)
                     .eq('status', 'pending')
-                    .order('created_at', { ascending: false });
+                    .order('created_at', { ascending: false })
+                    .abortSignal(AbortSignal.timeout(15000));
 
                 if (error) throw error;
 
-                alertsData = data.sort((a, b) => {
+                const incoming = data || [];
+                if (initialAlertsLoaded) notifyNewAlerts(incoming.filter(alert => !knownAlertIds.has(alert.id)));
+                incoming.forEach(alert => knownAlertIds.add(alert.id));
+                initialAlertsLoaded = true;
+                if (selectedAlert && !incoming.some(alert => alert.id === selectedAlert.id)) selectedAlert = null;
+                alertsData = incoming.sort((a, b) => {
                     if (a.confidence === 'Medium' && b.confidence === 'Low') return -1;
                     if (a.confidence === 'Low' && b.confidence === 'Medium') return 1;
                     return 0;
                 });
 
                 renderAlerts();
+                document.getElementById('alert-count').textContent = `(${alertsData.length})`;
+                syncStatus.textContent = 'Updated ' + new Date().toLocaleTimeString() + ' · checks every 15 seconds while open';
             } catch (err) {
                 console.error(err);
-                showToast("Failed to load alerts: " + err.message, "error");
+                syncStatus.textContent = 'Sync failed. Displayed alerts may be outdated. Retry or wait for the next check.';
+                if (!background || !initialAlertsLoaded) showState('Alerts unavailable', 'Could not load alerts. Check your connection or ask your administrator to check access permissions.', () => loadAlerts());
+            } finally {
+                loadingAlerts = false;
+                refreshButton.disabled = false;
             }
         }
 
         function renderAlerts() {
             alertListEl.innerHTML = '';
             
+            if (!selectedAlert) actionPanel.classList.remove('visible');
             if (alertsData.length === 0) {
                 alertListEl.innerHTML = `
                     <div class="empty-state">
@@ -455,6 +587,12 @@
                     <button class="btn-view-map">View Map Route</button>
                 `;
 
+                if (alert.message) {
+                    const message = document.createElement('p');
+                    message.textContent = alert.message;
+                    message.style.cssText = 'font-size:13px;line-height:1.5;margin:10px 0;white-space:pre-wrap;overflow-wrap:anywhere';
+                    card.appendChild(message);
+                }
                 card.addEventListener('click', () => selectAlert(alert, card));
                 alertListEl.appendChild(card);
             });
@@ -465,6 +603,10 @@
             renderAlerts(); 
 
             actionPanel.classList.add('visible');
+            if (!map || !routeSourceAdded) {
+                showToast('Map is unavailable or still loading. You can review the alert coordinates in the sidebar.');
+                return;
+            }
             mapLoading.style.display = 'flex';
 
             mapMarkers.forEach(m => m.remove());
@@ -555,6 +697,7 @@
         btnNoFire.addEventListener('click', () => updateAlertStatus('no_fire', false));
 
         async function initialize() {
+            showState('Loading ranger profile', 'Checking your zone assignment…');
             try {
                 const { data: { session }, error: sessionError } = await supabase.auth.getSession();
                 
@@ -566,25 +709,39 @@
                 currentUser = session.user;
                 userEmailDisplay.textContent = currentUser.email;
 
+                if (!map) {
+                    try { initMap(); }
+                    catch (error) {
+                        mapStatus.textContent = 'Map is unavailable in this browser. Alert details remain available in the sidebar.';
+                        console.error(error);
+                    }
+                }
+
                 const { data: rangerData, error: rangerError } = await supabase
                     .from('rangers')
                     .select('*')
                     .eq('email', currentUser.email)
-                    .single();
+                    .maybeSingle()
+                    .abortSignal(AbortSignal.timeout(15000));
 
-                if (rangerError || !rangerData) {
-                    throw new Error("Ranger profile not found for this email.");
+                if (rangerError) {
+                    throw new Error('Could not load your ranger profile. Check your connection or ask your administrator to check ranger access permissions.');
+                }
+                if (!rangerData || !rangerData.zone_id) {
+                    zoneDisplay.textContent = 'Zone not assigned';
+                    showState('Ranger setup required', 'You are signed in, but no accessible ranger profile with a zone assignment was found for ' + currentUser.email + '. Ask your administrator to check your ranger record and zone assignment, then try again.', initialize);
+                    return;
                 }
 
                 currentRanger = rangerData;
                 zoneDisplay.textContent = `Zone: ${currentRanger.zone_id}`;
 
-                initMap();
-                loadAlerts();
+                await loadAlerts();
+                startAlertUpdates();
 
             } catch (err) {
                 console.error(err);
-                showToast(err.message, "error");
+                showState('Dashboard unavailable', err.message || 'Please check your connection and try again.', initialize);
             }
         }
 

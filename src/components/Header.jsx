@@ -1,7 +1,7 @@
 import React from 'react';
 
 const nav = [
-  ['map','Map'], ['timeline','Timeline'], ['zones','Protected Zones'], ['species','Species Risk'], ['scanner','Zone Scanner'],
+  ['map','Map'], ['geofences','Forest Geofences'], ['dispatch','Send Ranger Alert'], ['timeline','Timeline'], ['zones','Protected Zones'], ['species','Species Risk'], ['scanner','Zone Scanner'],
   ['osint','OSINT'], ['tracks','Live Tracks'], ['forecast','Forecast'], ['report','Gov Report']
 ];
 
